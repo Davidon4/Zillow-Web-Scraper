@@ -6,23 +6,21 @@ import re
 import time
 import random
 import json
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 # More realistic browser headers
 headers = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
-    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'en-GB,en;q=0.9',
     'Accept-Encoding': 'gzip, deflate, br',
     'Connection': 'keep-alive',
     'Upgrade-Insecure-Requests': '1',
-    'Cache-Control': 'max-age=0',
     'sec-ch-ua': '" Not A;Brand";v="99", "Chromium";v="96", "Google Chrome";v="96"',
     'sec-ch-ua-mobile': '?0',
     'sec-ch-ua-platform': '"Windows"',
     'Sec-Fetch-Site': 'same-origin',
     'Sec-Fetch-Mode': 'navigate',
-    'Sec-Fetch-User': '?1',
     'Sec-Fetch-Dest': 'document',
     'Referer': 'https://www.zoopla.co.uk/',
     'DNT': '1'
@@ -34,10 +32,7 @@ def get_random_user_agent():
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36',
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36',
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.2 Safari/605.1.15',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:96.0) Gecko/20100101 Firefox/96.0',
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36 Edg/96.0.1054.62',
-        'Mozilla/5.0 (iPhone; CPU iPhone OS 15_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.2 Mobile/15E148 Safari/604.1'
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:96.0) Gecko/20100101 Firefox/96.0'
     ]
     return random.choice(user_agents)
 
@@ -54,144 +49,105 @@ def scrape_zoopla(location, num_pages=5):
     """
     all_properties = []
     
-    # Try alternative approach using the API
-    print("Attempting to use alternative method...")
-    try:
-        properties = scrape_zoopla_api(location, num_pages)
-        if properties:
-            return properties
-    except Exception as e:
-        print(f"API method failed: {e}")
-        print("Falling back to HTML scraping...")
-    
     with requests.session() as s:
-        # Set cookies and visit the homepage first
+        # First, visit the homepage to get cookies
         try:
-            print("Visiting homepage to set cookies...")
+            print("Setting up session...")
             s.get('https://www.zoopla.co.uk/', headers=headers, timeout=10)
             time.sleep(random.uniform(2, 4))
         except Exception as e:
             print(f"Error visiting homepage: {e}")
         
         for page in range(1, num_pages + 1):
-            # Update headers with a random user agent for each request
-            current_headers = headers.copy()
-            current_headers['User-Agent'] = get_random_user_agent()
-            
-            # Format URL for the search - use encoded location
-            encoded_location = quote(location.lower().replace(' ', '-'))
-            url = f'https://www.zoopla.co.uk/for-sale/{encoded_location}/?page_size=25&q={location}&radius=0&results_sort=newest_listings&pn={page}'
-            
             try:
-                # Add random delay to avoid being blocked
-                delay = random.uniform(5, 10)
+                # Add random delay between requests
+                delay = random.uniform(3, 7)
                 print(f"Waiting {delay:.2f} seconds before fetching page {page}...")
                 time.sleep(delay)
                 
-                # Get the page
-                print(f"Fetching page {page}...")
+                # Update headers with random user agent
+                current_headers = headers.copy()
+                current_headers['User-Agent'] = get_random_user_agent()
+                
+                # Construct the search URL for the current page
+                if page == 1:
+                    url = f"https://www.zoopla.co.uk/for-sale/property/{location.lower()}/?q={quote(location)}&search_source=home"
+                else:
+                    url = f"https://www.zoopla.co.uk/for-sale/property/{location.lower}/?q={quote(location)}&search_source=home&pn={page}"
+                
+                print(f"Fetching page {page} with URL: {url}")
                 response = s.get(url, headers=current_headers, timeout=15)
+                response.raise_for_status()
                 
-                if response.status_code == 403:
-                    print(f"Access forbidden (403) for page {page}. Zoopla is blocking the scraper.")
-                    continue
+                # Save the HTML for debugging
+                with open(f"zoopla_page_{page}.html", "w", encoding="utf-8") as f:
+                    f.write(response.text)
+                print(f"Saved HTML to zoopla_page_{page}.html for debugging")
                 
-                response.raise_for_status()  # Raise exception for other HTTP errors
-                
-                # Parse the HTML
                 soup = BeautifulSoup(response.content, 'html.parser')
                 
-                # Check for captcha or robot detection
-                if "captcha" in response.text.lower() or "robot" in response.text.lower():
-                    print("Captcha or robot detection encountered. Cannot proceed with scraping.")
-                    with open(f"zoopla_captcha_page_{page}.html", "w", encoding="utf-8") as f:
-                        f.write(str(soup))
-                    print(f"Saved captcha page to zoopla_captcha_page_{page}.html")
-                    break
+                # Find all property listings - use multiple selectors to catch different HTML structures
+                listings = []
                 
-                # Find all property listings - Zoopla's current structure
-                listings = soup.find_all('div', {'data-testid': 'search-result'})
+                # Try different selectors that might match property listings
+                selectors = [
+                    '[data-testid="search-result"]',
+                    '.listing-results-wrapper',
+                    '.srp clearfix',
+                    'article.listing-results'
+                ]
                 
-                if not listings:
-                    # Try alternative class names if the above doesn't work
-                    listings = soup.find_all('div', class_=lambda c: c and 'listing-results-wrapper' in c)
-                    
-                if not listings:
-                    # Try another alternative
-                    listings = soup.find_all('div', class_=lambda c: c and 'property-card' in c)
+                for selector in selectors:
+                    listings = soup.select(selector)
+                    if listings:
+                        print(f"Found listings with selector: {selector}")
+                        break
                 
                 if not listings:
-                    print(f"No listings found on page {page}. Zoopla may have changed their HTML structure.")
-                    # Save the HTML for debugging
-                    with open(f"zoopla_debug_page_{page}.html", "w", encoding="utf-8") as f:
-                        f.write(str(soup))
-                    print(f"Saved HTML to zoopla_debug_page_{page}.html for debugging")
+                    print(f"No listings found on page {page}. The page structure might have changed.")
                     continue
                 
                 print(f"Found {len(listings)} listings on page {page}")
                 
                 # Process each listing
+                page_properties = []
                 for listing in listings:
                     property_data = {}
                     
                     # Extract price
-                    price_elem = listing.find('p', {'data-testid': 'listing-price'})
-                    if not price_elem:
-                        price_elem = listing.find(class_=lambda c: c and ('price' in c.lower() if c else False))
+                    price_elem = listing.select_one('[data-testid="listing-price"], .listing-results-price')
                     if price_elem:
                         property_data['price'] = price_elem.text.strip()
                     
                     # Extract address
-                    address_elem = listing.find('h2', {'data-testid': 'listing-title'})
-                    if not address_elem:
-                        address_elem = listing.find('h3', {'data-testid': 'listing-title'})
-                    if not address_elem:
-                        address_elem = listing.find(class_=lambda c: c and ('address' in c.lower() if c else False))
+                    address_elem = listing.select_one('[data-testid="listing-address"], .listing-results-address')
                     if address_elem:
                         property_data['address'] = address_elem.text.strip()
                     
-                    # Extract details (beds, baths, etc.)
-                    details_elem = listing.find('div', {'data-testid': 'listing-spec'})
-                    if not details_elem:
-                        details_elem = listing.find(class_=lambda c: c and ('specs' in c.lower() if c else False))
-                    
+                    # Extract property details (beds, baths, etc.)
+                    details_elem = listing.select_one('[data-testid="listing-spec"], .listing-results-attributes')
                     if details_elem:
-                        details_text = details_elem.text.strip()
+                        # Extract number of bedrooms
+                        beds_elem = details_elem.find(string=re.compile(r'\d+\s*bed'))
+                        if beds_elem:
+                            beds_match = re.search(r'(\d+)\s*bed', beds_elem, re.IGNORECASE)
+                            if beds_match:
+                                property_data['beds'] = beds_match.group(1)
                         
-                        # Extract beds
-                        beds_match = re.search(r'(\d+)\s*bed', details_text, re.IGNORECASE)
-                        property_data['beds'] = beds_match.group(1) if beds_match else '0'
-                        
-                        # Extract baths
-                        baths_match = re.search(r'(\d+)\s*bath', details_text, re.IGNORECASE)
-                        property_data['baths'] = baths_match.group(1) if baths_match else '0'
-                        
-                        # Extract sq feet/area
-                        area_match = re.search(r'(\d+,?\d*)\s*sq\s*ft', details_text, re.IGNORECASE)
-                        if not area_match:
-                            area_match = re.search(r'(\d+,?\d*)\s*m²', details_text, re.IGNORECASE)
-                        property_data['sq_feet'] = area_match.group(1).replace(',', '') if area_match else '0'
+                        # Extract number of bathrooms
+                        baths_elem = details_elem.find(string=re.compile(r'\d+\s*bath'))
+                        if baths_elem:
+                            baths_match = re.search(r'(\d+)\s*bath', baths_elem, re.IGNORECASE)
+                            if baths_match:
+                                property_data['baths'] = baths_match.group(1)
                     
                     # Extract property type
-                    type_elem = listing.find('p', {'data-testid': 'listing-description'})
-                    if not type_elem:
-                        type_elem = listing.find(class_=lambda c: c and ('description' in c.lower() if c else False))
-                    
+                    type_elem = listing.select_one('[data-testid="listing-type"], .property-type')
                     if type_elem:
-                        type_text = type_elem.text.strip()
-                        property_types = ['Detached', 'Semi-detached', 'Terraced', 'Flat', 'Bungalow', 'Apartment', 'House']
-                        for p_type in property_types:
-                            if p_type.lower() in type_text.lower():
-                                property_data['type'] = p_type
-                                break
-                        else:
-                            property_data['type'] = 'Not specified'
+                        property_data['type'] = type_elem.text.strip()
                     
                     # Extract link
-                    link_elem = listing.find('a', {'data-testid': 'listing-details-link'})
-                    if not link_elem:
-                        link_elem = listing.find('a', href=lambda h: h and '/details/' in h)
-                    
+                    link_elem = listing.select_one('a[href*="/for-sale/details/"]')
                     if link_elem and 'href' in link_elem.attrs:
                         href = link_elem['href']
                         if href.startswith('/'):
@@ -199,16 +155,33 @@ def scrape_zoopla(location, num_pages=5):
                         else:
                             property_data['link'] = href
                     
-                    if property_data:  # Only add if we found some data
-                        all_properties.append(property_data)
+                    # Extract agent
+                    agent_elem = listing.select_one('[data-testid="listing-agent"], .agent-results-link')
+                    if agent_elem:
+                        property_data['agent'] = agent_elem.text.strip()
+                    
+                    # Extract description
+                    desc_elem = listing.select_one('[data-testid="listing-description"], .listing-results-description')
+                    if desc_elem:
+                        property_data['description'] = desc_elem.text.strip()
+                    
+                    if property_data:
+                        page_properties.append(property_data)
                 
-                print(f"Successfully processed {len(all_properties)} properties from page {page}")
+                all_properties.extend(page_properties)
+                print(f"Successfully processed {len(page_properties)} properties from page {page}")
+                
+                if not page_properties:
+                    print("No properties found on this page. Stopping search.")
+                    break
                 
             except requests.exceptions.RequestException as e:
                 print(f"Error fetching page {page}: {e}")
                 continue
             except Exception as e:
                 print(f"Unexpected error on page {page}: {e}")
+                import traceback
+                traceback.print_exc()
                 continue
     
     # Clean up data
@@ -221,76 +194,6 @@ def scrape_zoopla(location, num_pages=5):
                 prop['price'] = price_match.group(1).replace(',', '')
     
     return all_properties
-
-def scrape_zoopla_api(location, num_pages=5):
-    """Try to use Zoopla's API to get property data"""
-    properties = []
-    
-    with requests.session() as s:
-        # Set cookies and visit the homepage first
-        s.get('https://www.zoopla.co.uk/', headers=headers)
-        time.sleep(random.uniform(2, 4))
-        
-        for page in range(1, num_pages + 1):
-            # Update headers with a random user agent for each request
-            current_headers = headers.copy()
-            current_headers['User-Agent'] = get_random_user_agent()
-            current_headers['Content-Type'] = 'application/json'
-            current_headers['Accept'] = 'application/json'
-            
-            # Try to find the API endpoint by examining the network requests
-            api_url = f"https://www.zoopla.co.uk/api/v1/search?q={location}&page_size=25&page_number={page}&section=for-sale&view_type=list"
-            
-            try:
-                time.sleep(random.uniform(5, 10))
-                response = s.get(api_url, headers=current_headers)
-                
-                if response.status_code == 200 and 'application/json' in response.headers.get('Content-Type', ''):
-                    data = response.json()
-                    
-                    # Save the API response for debugging
-                    with open(f"zoopla_api_response_page_{page}.json", "w", encoding="utf-8") as f:
-                        json.dump(data, f, indent=2)
-                    
-                    # Extract property data from the API response
-                    # This will need to be adjusted based on the actual API response structure
-                    if 'properties' in data:
-                        for prop in data['properties']:
-                            property_data = {}
-                            
-                            if 'price' in prop:
-                                property_data['price'] = str(prop['price'])
-                            
-                            if 'address' in prop:
-                                property_data['address'] = prop['address']
-                            
-                            if 'num_bedrooms' in prop:
-                                property_data['beds'] = str(prop['num_bedrooms'])
-                            
-                            if 'num_bathrooms' in prop:
-                                property_data['baths'] = str(prop['num_bathrooms'])
-                            
-                            if 'floor_area' in prop:
-                                property_data['sq_feet'] = str(prop['floor_area'])
-                            
-                            if 'property_type' in prop:
-                                property_data['type'] = prop['property_type']
-                            
-                            if 'details_url' in prop:
-                                property_data['link'] = prop['details_url']
-                            
-                            properties.append(property_data)
-                    
-                    print(f"Successfully fetched {len(properties)} properties from API (page {page})")
-                else:
-                    print(f"API request failed with status code {response.status_code}")
-                    return []
-                
-            except Exception as e:
-                print(f"Error with API request: {e}")
-                return []
-    
-    return properties
 
 def save_to_csv(properties, filename):
     """Save properties to a CSV file"""
@@ -336,9 +239,9 @@ def print_alternative_options():
 
 if __name__ == "__main__":
     # Example usage
-    location = input("Enter location to search (e.g., london): ").strip()
+    location = input("Enter location to search (e.g., London, Manchester, Birmingham): ").strip()
     if not location:
-        location = "london"
+        location = "London"
     
     try:
         num_pages = int(input("Enter number of pages to scrape (default 5): ") or "5")
@@ -349,16 +252,17 @@ if __name__ == "__main__":
     properties = scrape_zoopla(location, num_pages)
     
     if not properties:
-        print("No properties found. Zoopla is likely blocking the scraper.")
-        print_alternative_options()
+        print("No properties found. Please check the location name or try again later.")
     else:
         # Save to CSV
-        output_file = f"zoopla_{location}_properties.csv"
+        output_file = f"zoopla_{location.lower().replace(' ', '_')}_properties.csv"
         save_to_csv(properties, output_file)
         
         # Display first few properties
         display_properties(properties)
         
         # Also save as JSON for easier viewing
-        with open(f"zoopla_{location}_properties.json", 'w', encoding='utf-8') as f:
+        json_file = f"zoopla_{location.lower().replace(' ', '_')}_properties.json"
+        with open(json_file, 'w', encoding='utf-8') as f:
             json.dump(properties, f, indent=2)
+        print(f"\nData also saved to {json_file}")
