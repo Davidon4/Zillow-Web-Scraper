@@ -7,20 +7,101 @@ import time
 import random
 import json
 from urllib.parse import quote, urlencode
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+# Configure retry strategy
+retry_strategy = Retry(
+    total=5,  # number of retries
+    backoff_factor=0.5,  # wait 0.5 * (2 ** retry) seconds between retries
+    status_forcelist=[500, 502, 503, 504, 429]  # HTTP status codes to retry on
+)
+
+def get_free_proxies():
+    """Get a list of free proxies"""
+    proxies = []
+    try:
+        # Get proxies from free-proxy-list.net
+        response = requests.get('https://free-proxy-list.net/')
+        soup = BeautifulSoup(response.text, 'html.parser')
+        proxy_table = soup.find('table')
+        
+        if proxy_table:
+            for row in proxy_table.find_all('tr')[1:]:  # Skip header row
+                columns = row.find_all('td')
+                if len(columns) >= 7:
+                    ip = columns[0].text.strip()
+                    port = columns[1].text.strip()
+                    https = columns[6].text.strip()
+                    
+                    if https == 'yes':  # Only use HTTPS proxies
+                        proxy = f'http://{ip}:{port}'
+                        proxies.append(proxy)
+        
+        print(f"Found {len(proxies)} free proxies")
+        return proxies
+    except Exception as e:
+        print(f"Error fetching free proxies: {e}")
+        return []
+
+def test_proxy(proxy):
+    """Test if a proxy is working"""
+    try:
+        response = requests.get(
+            'https://www.rightmove.co.uk',
+            proxies={'http': proxy, 'https': proxy},
+            timeout=10
+        )
+        return response.status_code == 200
+    except:
+        return False
+
+def get_working_proxy():
+    """Get a working proxy from the free proxy list"""
+    proxies = get_free_proxies()
+    for proxy in proxies:
+        print(f"Testing proxy: {proxy}")
+        if test_proxy(proxy):
+            print(f"Found working proxy: {proxy}")
+            return proxy
+    return None
+
+# Create session with retry strategy
+def create_session(proxy=None):
+    """
+    Create a session with retry strategy and optional proxy
+    
+    Args:
+        proxy (str): Optional proxy URL
+    """
+    session = requests.Session()
+    
+    # Configure proxy if provided
+    if proxy:
+        session.proxies = {
+            'http': proxy,
+            'https': proxy
+        }
+    
+    adapter = HTTPAdapter(max_retries=retry_strategy, pool_maxsize=10)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
 
 # More realistic browser headers
 headers = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
     'Accept-Language': 'en-GB,en;q=0.9',
     'Accept-Encoding': 'gzip, deflate, br',
     'Connection': 'keep-alive',
     'Upgrade-Insecure-Requests': '1',
-    'sec-ch-ua': '" Not A;Brand";v="99", "Chromium";v="96", "Google Chrome";v="96"',
+    'sec-ch-ua': '"Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121"',
     'sec-ch-ua-mobile': '?0',
     'sec-ch-ua-platform': '"Windows"',
     'Sec-Fetch-Site': 'same-origin',
     'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-User': '?1',
     'Sec-Fetch-Dest': 'document',
     'Referer': 'https://www.rightmove.co.uk/',
     'DNT': '1'
@@ -29,12 +110,48 @@ headers = {
 def get_random_user_agent():
     """Return a random user agent to avoid detection"""
     user_agents = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.2 Safari/605.1.15',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:96.0) Gecko/20100101 Firefox/96.0'
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2.1 Safari/605.1.15',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Edge/121.0.2277.83 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0'
     ]
     return random.choice(user_agents)
+
+def make_request(session, url, max_retries=3, initial_delay=15):
+    """Make a request with exponential backoff retry logic"""
+    for attempt in range(max_retries):
+        try:
+            current_headers = headers.copy()
+            current_headers['User-Agent'] = get_random_user_agent()
+            
+            # Add random delay between requests
+            delay = initial_delay * (2 ** attempt) + random.uniform(5, 15)
+            print(f"Waiting {delay:.2f} seconds before making request...")
+            time.sleep(delay)
+            
+            response = session.get(url, headers=current_headers, timeout=60)
+            response.raise_for_status()
+            
+            time.sleep(random.uniform(2, 5))
+            return response
+            
+        except requests.exceptions.RequestException as e:
+            print(f"Attempt {attempt + 1}/{max_retries} failed: {str(e)}")
+            if attempt == max_retries - 1:
+                # Try to get a new proxy if the current one fails
+                if session.proxies:
+                    print("Attempting to get a new proxy...")
+                    new_proxy = get_working_proxy()
+                    if new_proxy:
+                        print(f"Switching to new proxy: {new_proxy}")
+                        session.proxies = {'http': new_proxy, 'https': new_proxy}
+                        continue
+                raise
+            print(f"Retrying in {delay:.2f} seconds...")
+            time.sleep(random.uniform(10, 20))
+            
+    return None
 
 def scrape_property_details(session, property_url):
     """
@@ -521,7 +638,7 @@ def scrape_property_details(session, property_url):
         traceback.print_exc()
         return details
 
-def scrape_rightmove(location, num_pages=5, fetch_details=True, max_details=10):
+def scrape_rightmove(location, num_pages=5, fetch_details=True, max_details=10, proxy=None):
     """
     Scrape property listings from Rightmove
     
@@ -530,14 +647,13 @@ def scrape_rightmove(location, num_pages=5, fetch_details=True, max_details=10):
         num_pages (int): Number of pages to scrape
         fetch_details (bool): Whether to fetch detailed information for each property
         max_details (int): Maximum number of properties to fetch details for
+        proxy (str): Optional proxy URL (e.g., 'http://username:password@proxy.com:8080')
     
     Returns:
         list: List of dictionaries containing property data
     """
     all_properties = []
-    # Track property IDs to avoid duplicates
     seen_property_ids = set()
-    # Track property URLs to avoid duplicates
     seen_property_urls = set()
     
     # Define known location identifiers for common locations
@@ -546,79 +662,62 @@ def scrape_rightmove(location, num_pages=5, fetch_details=True, max_details=10):
         "manchester": "REGION%5E162",
         "birmingham": "REGION%5E162",
         "leeds": "REGION%5E787",
-        "liverpool": "REGION%5E138"
+        "liverpool": "REGION%5E138",
+        "sheffield": "REGION%5E181",
+        "newcastle": "REGION%5E250",
+        "bristol": "REGION%5E275",
+        "nottingham": "REGION%5E389",
+        "leicester": "REGION%5E156",
+        "edinburgh": "REGION%5E475",
+        "glasgow": "REGION%5E550",
+        "aberdeen": "REGION%5E663",
+        "dundee": "REGION%5E723",
+        "cardiff": "REGION%5E409",
+        "swansea": "REGION%5E461",
+        "newport": "REGION%5E437",
+        "belfast": "REGION%5E606",
+        "derry": "REGION%5E853"
     }
     
-    # Get the location identifier or use a default search approach
     location_lower = location.lower()
     location_id = location_identifiers.get(location_lower)
     
-    with requests.session() as s:
-        # First, visit the homepage to get cookies
-        try:
-            print("Setting up session...")
-            s.get('https://www.rightmove.co.uk/', headers=headers, timeout=10)
-            time.sleep(random.uniform(2, 4))
-        except Exception as e:
-            print(f"Error visiting homepage: {e}")
+    session = create_session(proxy)
+    
+    try:
+        print("Setting up session...")
+        # Visit homepage first to get cookies
+        response = make_request(session, 'https://www.rightmove.co.uk/')
+        time.sleep(random.uniform(2, 4))
         
-        # If we don't have a predefined location ID, try to get it
         if not location_id:
-            try:
-                print("Getting location identifier...")
-                # Use the new URL format
-                search_url = f"https://www.rightmove.co.uk/property-for-sale/search.html?searchLocation={quote(location)}&useLocationIdentifier=true"
-                response = s.get(search_url, headers=headers, timeout=15)
-                
-                # Extract the location identifier from the response URL
-                match = re.search(r'locationIdentifier=([^&]+)', response.url)
-                if match:
-                    location_id = match.group(1)
-                    print(f"Found location identifier: {location_id}")
-                else:
-                    print("Could not find location identifier in URL")
-                    # As a fallback, try a basic search with the location name
-                    location_id = f"REGION%5E{location.lower()}"
-                    print(f"Using fallback location identifier: {location_id}")
-            except Exception as e:
-                print(f"Error getting location identifier: {e}")
-                # As a fallback, try a basic search with the location name
+            print("Getting location identifier...")
+            search_url = f"https://www.rightmove.co.uk/property-for-sale/search.html?searchLocation={quote(location)}&useLocationIdentifier=true"
+            response = make_request(session, search_url)
+            
+            match = re.search(r'locationIdentifier=([^&]+)', response.url)
+            if match:
+                location_id = match.group(1)
+                print(f"Found location identifier: {location_id}")
+            else:
+                print("Could not find location identifier in URL")
                 location_id = f"REGION%5E{location.lower()}"
-                print(f"Using fallback location identifier: {location_id}")
-        else:
-            print(f"Using predefined location identifier for {location}: {location_id}")
         
-        for page in range(0, num_pages):
+        for page in range(num_pages):
             try:
-                # Add random delay between requests
-                delay = random.uniform(3, 7)
-                print(f"Waiting {delay:.2f} seconds before fetching page {page + 1}...")
-                time.sleep(delay)
-                
-                # Update headers with random user agent
-                current_headers = headers.copy()
-                current_headers['User-Agent'] = get_random_user_agent()
-                
-                # Get the search results page - use the correct Rightmove URL format
-                index = page * 24  # Rightmove shows 24 properties per page
+                index = page * 24
                 url = f"https://www.rightmove.co.uk/property-for-sale/find.html?searchType=SALE&locationIdentifier={location_id}&index={index}&propertyTypes=&includeSSTC=false&mustHave=&dontShow=&furnishTypes=&keywords="
                 
-                print(f"Fetching page {page + 1} with URL: {url}")
-                response = s.get(url, headers=current_headers, timeout=15)
+                print(f"\nFetching page {page + 1}/{num_pages}")
+                response = make_request(session, url)
                 
-                if response.status_code != 200:
-                    print(f"Error with status code: {response.status_code}")
-                    # Try alternative URL format
-                    url = f"https://www.rightmove.co.uk/property-for-sale/find.html?locationIdentifier={location_id}&index={index}"
-                    print(f"Trying alternative URL: {url}")
-                    response = s.get(url, headers=current_headers, timeout=15)
-                
-                response.raise_for_status()
+                if not response:
+                    print(f"Failed to fetch page {page + 1}")
+                    continue
                 
                 # Save the HTML for debugging
                 with open(f"rightmove_page_{page + 1}.html", "w", encoding="utf-8") as f:
                     f.write(response.text)
-                print(f"Saved HTML to rightmove_page_{page + 1}.html for debugging")
                 
                 soup = BeautifulSoup(response.content, 'html.parser')
                 
@@ -750,17 +849,21 @@ def scrape_rightmove(location, num_pages=5, fetch_details=True, max_details=10):
                 import traceback
                 traceback.print_exc()
                 continue
-    
-    print(f"Total unique properties found: {len(all_properties)}")
-    
-    # Clean up data
-    for prop in all_properties:
-        if 'price' in prop:
-            # Extract numeric price value
-            price_text = prop['price']
-            price_match = re.search(r'£?([\d,]+)', price_text)
-            if price_match:
-                prop['price'] = price_match.group(1).replace(',', '')
+    except Exception as e:
+        print(f"Error during scraping: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        print(f"Total unique properties found: {len(all_properties)}")
+        
+        # Clean up data
+        for prop in all_properties:
+            if 'price' in prop:
+                # Extract numeric price value
+                price_text = prop['price']
+                price_match = re.search(r'£?([\d,]+)', price_text)
+                if price_match:
+                    prop['price'] = price_match.group(1).replace(',', '')
     
     # Fetch detailed information for each property
     if fetch_details and all_properties:
@@ -773,7 +876,7 @@ def scrape_rightmove(location, num_pages=5, fetch_details=True, max_details=10):
         for i, prop in enumerate(properties_to_process):
             if 'link' in prop:
                 print(f"Fetching details for property {i+1}/{len(properties_to_process)}...")
-                details = scrape_property_details(s, prop['link'])
+                details = scrape_property_details(session, prop['link'])
                 # Merge the details with the property data
                 prop.update(details)
             properties_with_details.append(prop)
@@ -863,8 +966,16 @@ if __name__ == "__main__":
     else:
         max_details = 0
     
+    # Try to get a working proxy
+    print("Searching for a working proxy...")
+    proxy = get_working_proxy()
+    if proxy:
+        print(f"Using proxy: {proxy}")
+    else:
+        print("No working proxy found. Continuing without proxy...")
+    
     print(f"Scraping Rightmove for properties in {location}...")
-    properties = scrape_rightmove(location, num_pages, fetch_details, max_details)
+    properties = scrape_rightmove(location, num_pages, fetch_details, max_details, proxy=proxy)
     
     if not properties:
         print("No properties found. Please check the location name or try again later.")
