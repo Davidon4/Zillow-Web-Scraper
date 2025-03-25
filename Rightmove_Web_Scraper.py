@@ -676,10 +676,19 @@ def scrape_rightmove(location, num_pages=5, fetch_details=True, max_details=10, 
         "swansea": "REGION%5E461",
         "newport": "REGION%5E437",
         "belfast": "REGION%5E606",
-        "derry": "REGION%5E853"
+        "derry": "REGION%5E853",
+        "brighton": "REGION%5E1234",
+        "brighton & hove": "REGION%5E1234",
+        "hove": "REGION%5E1234",
+        "southampton": "REGION%5E1235",
+        "derby": "REGION%5E1236",
+        "milton keynes": "REGION%5E1237",
+        "bournemouth": "REGION%5E1238",
+        "portsmouth": "REGION%5E1239",
+        "york": "REGION%5E1240"
     }
     
-    location_lower = location.lower()
+    location_lower = location.lower().strip()
     location_id = location_identifiers.get(location_lower)
     
     session = create_session(proxy)
@@ -692,7 +701,9 @@ def scrape_rightmove(location, num_pages=5, fetch_details=True, max_details=10, 
         
         if not location_id:
             print("Getting location identifier...")
-            search_url = f"https://www.rightmove.co.uk/property-for-sale/search.html?searchLocation={quote(location)}&useLocationIdentifier=true"
+            # Clean the location string for URL
+            clean_location = location.replace('&', 'and').replace(',', '').strip()
+            search_url = f"https://www.rightmove.co.uk/property-for-sale/search.html?searchLocation={quote(clean_location)}&useLocationIdentifier=true"
             response = make_request(session, search_url)
             
             match = re.search(r'locationIdentifier=([^&]+)', response.url)
@@ -701,7 +712,15 @@ def scrape_rightmove(location, num_pages=5, fetch_details=True, max_details=10, 
                 print(f"Found location identifier: {location_id}")
             else:
                 print("Could not find location identifier in URL")
-                location_id = f"REGION%5E{location.lower()}"
+                # Try a simpler search without location identifier
+                search_url = f"https://www.rightmove.co.uk/property-for-sale/search.html?searchLocation={quote(clean_location)}"
+                response = make_request(session, search_url)
+                match = re.search(r'locationIdentifier=([^&]+)', response.url)
+                if match:
+                    location_id = match.group(1)
+                    print(f"Found location identifier: {location_id}")
+                else:
+                    raise ValueError(f"Could not find location identifier for {location}")
         
         for page in range(num_pages):
             try:
@@ -914,6 +933,227 @@ def save_to_csv(properties, filename):
     
     print(f"Saved {len(properties)} properties to {filename}")
 
+def transform_to_uk_property_format(properties):
+    """
+    Transform scraped Rightmove properties to a uniform UKProperty format.
+    Only includes properties that have all the required fields.
+    
+    UKProperty format:
+    {
+      id: string;
+      address: string;
+      price: number;
+      bedrooms: number | null;
+      bathrooms: number | null;
+      square_feet: number | null;
+      image_url: string | null;
+      property_type?: string;
+      description?: string;
+      latitude?: number;
+      longitude?: number;
+      agent?: {
+        name: string;
+        phone: string;
+      };
+      created_at: string;
+      updated_at: string;
+      property_details?: {
+        market_demand: string;
+        area_growth: string;
+        crime_rate: string;
+        nearby_schools: number;
+        energy_rating: string;
+        council_tax_band: string;
+        property_features: string[];
+        tenure?: string;
+        time_remaining_on_lease?: string;
+      };
+      listing_type: string;
+    }
+    """
+    transformed_properties = []
+    skipped_count = 0
+    
+    for prop in properties:
+        # Check required fields before proceeding
+        if not all(key in prop for key in ['property_id', 'address', 'price']):
+            skipped_count += 1
+            continue
+            
+        # Only process properties with valid numeric price
+        try:
+            price = int(prop.get('price', '0').replace(',', ''))
+            if price <= 0:
+                skipped_count += 1
+                continue
+        except (ValueError, TypeError):
+            skipped_count += 1
+            continue
+        
+        # Start building the property object with required fields
+        uk_property = {
+            "id": prop['property_id'],
+            "address": prop['address'],
+            "price": price,
+            "listing_type": "for-sale"
+        }
+        
+        # Only add fields that are actually present in the data
+        
+        # Bedrooms
+        if 'beds' in prop and prop['beds'] and prop['beds'].isdigit():
+            uk_property["bedrooms"] = int(prop['beds'])
+            
+        # Bathrooms
+        if 'baths' in prop and prop['baths'] and prop['baths'].isdigit():
+            uk_property["bathrooms"] = int(prop['baths'])
+        
+        # Date information
+        if 'date_added' in prop and prop['date_added']:
+            uk_property["created_at"] = prop['date_added']
+            uk_property["updated_at"] = prop['date_added']
+        
+        # Property type
+        if 'type' in prop and prop['type']:
+            uk_property["property_type"] = prop['type']
+        
+        # Description
+        if 'description' in prop and prop['description']:
+            if isinstance(prop['description'], list):
+                uk_property["description"] = ' '.join(prop['description'])
+            else:
+                uk_property["description"] = prop['description']
+        
+        # Coordinates
+        if 'latitude' in prop and 'longitude' in prop:
+            try:
+                lat = float(prop['latitude'])
+                long = float(prop['longitude'])
+                uk_property["latitude"] = lat
+                uk_property["longitude"] = long
+            except (ValueError, TypeError):
+                pass
+        
+        # Square feet from property_size
+        if 'property_size' in prop and prop['property_size']:
+            try:
+                sq_ft = prop['property_size'].replace('sq. ft', '').strip()
+                uk_property["square_feet"] = int(float(sq_ft))
+            except (ValueError, TypeError):
+                pass
+        
+        # Image URL
+        if 'property_images' in prop and prop['property_images']:
+            try:
+                images = json.loads(prop['property_images']) if isinstance(prop['property_images'], str) else prop['property_images']
+                if images and len(images) > 0:
+                    uk_property["image_url"] = images[0]
+            except (json.JSONDecodeError, TypeError):
+                pass
+        
+        # Extract agent details - only if present
+        agent_info = {}
+        if 'agent' in prop and prop['agent']:
+            agent_info["name"] = prop['agent']
+        
+        if 'agent_details' in prop and prop['agent_details']:
+            try:
+                agent_details = json.loads(prop['agent_details']) if isinstance(prop['agent_details'], str) else prop['agent_details']
+                if 'agent_name' in agent_details and agent_details['agent_name']:
+                    agent_info["name"] = agent_details['agent_name']
+                if 'agent_phone' in agent_details and agent_details['agent_phone']:
+                    agent_info["phone"] = agent_details['agent_phone']
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                pass
+        
+        # Only add agent if we have valid data
+        if agent_info and "name" in agent_info:
+            if "phone" not in agent_info:
+                # Don't add incomplete agent information
+                continue
+            uk_property["agent"] = agent_info
+        
+        # Build property details - only include fields that have real data
+        property_details = {}
+        
+        # Tenure - only add if present
+        if 'tenure' in prop and prop['tenure']:
+            property_details["tenure"] = prop['tenure']
+            
+            # If it's leasehold, check for remaining years
+            if 'leasehold' in prop['tenure'].lower() and 'years' in prop['tenure'].lower():
+                years_match = re.search(r'(\d+)\s*years', prop['tenure'], re.IGNORECASE)
+                if years_match:
+                    property_details["time_remaining_on_lease"] = f"{years_match.group(1)} years"
+        
+        # Add time_remaining_on_lease if explicitly provided
+        elif 'time_remaining_on_lease' in prop and prop['time_remaining_on_lease']:
+            property_details["time_remaining_on_lease"] = prop['time_remaining_on_lease']
+        
+        # Energy rating
+        if 'ecp_rating' in prop and prop['ecp_rating']:
+            property_details["energy_rating"] = prop['ecp_rating']
+        
+        # Council tax band
+        if 'council_tax_band' in prop and prop['council_tax_band']:
+            property_details["council_tax_band"] = prop['council_tax_band']
+        
+        # Features
+        if 'features' in prop and prop['features']:
+            try:
+                if isinstance(prop['features'], list) and prop['features']:
+                    property_details["property_features"] = prop['features']
+                elif isinstance(prop['features'], str) and prop['features']:
+                    property_details["property_features"] = [prop['features']]
+            except (TypeError, AttributeError):
+                pass
+        
+        # Nearby schools count
+        if 'points_ofInterest' in prop and prop['points_ofInterest']:
+            try:
+                poi = json.loads(prop['points_ofInterest']) if isinstance(prop['points_ofInterest'], str) else prop['points_ofInterest']
+                if poi:
+                    school_count = sum(1 for point in poi if 'school' in point.get('point', '').lower())
+                    if school_count > 0:
+                        property_details["nearby_schools"] = school_count
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                pass
+        
+        # Market stats
+        if 'market_stats_last_12_months' in prop and prop['market_stats_last_12_months']:
+            try:
+                market_stats = json.loads(prop['market_stats_last_12_months']) if isinstance(prop['market_stats_last_12_months'], str) else prop['market_stats_last_12_months']
+                
+                if market_stats:
+                    if 'properties_sold' in market_stats and market_stats['properties_sold']:
+                        sold_count = int(market_stats['properties_sold'])
+                        property_details["market_demand"] = f"High ({sold_count} properties sold)" if sold_count > 10 else f"Low ({sold_count} properties sold)"
+                    
+                    if 'average_estimated' in market_stats and market_stats['average_estimated']:
+                        avg_price_str = market_stats['average_estimated'].replace('£', '').replace(',', '')
+                        try:
+                            avg_price = int(avg_price_str)
+                            if avg_price > 0 and price > 0:
+                                percentage = ((price - avg_price) / avg_price) * 100
+                                property_details["area_growth"] = f"{percentage:.1f}% {'above' if percentage > 0 else 'below'} average"
+                        except (ValueError, TypeError):
+                            pass
+            except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+                pass
+        
+        # Only add property details if we have real data
+        if property_details:
+            uk_property["property_details"] = property_details
+        
+        # After all processing, check if we have a valid property with minimum required fields
+        if all(key in uk_property for key in ['id', 'address', 'price']):
+            transformed_properties.append(uk_property)
+        else:
+            skipped_count += 1
+    
+    print(f"Transformed {len(transformed_properties)} properties. Skipped {skipped_count} properties due to incomplete data.")
+    return transformed_properties
+
 def display_properties(properties, num=5):
     """Display the first few properties"""
     if not properties:
@@ -943,13 +1183,15 @@ def display_properties(properties, num=5):
             print(f"  Nearby stations: {len(prop['nearby_stations'])} found")
 
 if __name__ == "__main__":
-    # Example usage
-    location = input("Enter location to search (e.g., London, Manchester, Birmingham): ").strip()
-    if not location:
-        location = "London"
+    # Get list of locations to search
+    locations_input = input("Enter locations to search (comma-separated, e.g., Southampton, Derby, Milton Keynes, Bournemouth, Portsmouth, York, Newport): ").strip()
+    locations = [loc.strip() for loc in locations_input.split(',') if loc.strip()]
+    
+    if not locations:
+        locations = ["Southampton", "Derby", "Milton Keynes", "Bournemouth", "Portsmouth", "York", "Newport"]
     
     try:
-        num_pages = int(input("Enter number of pages to scrape (default 5): ") or "5")
+        num_pages = int(input("Enter number of pages to scrape per location (default 5): ") or "5")
     except ValueError:
         num_pages = 5
     
@@ -960,7 +1202,7 @@ if __name__ == "__main__":
     
     if fetch_details:
         try:
-            max_details = int(input("Maximum number of properties to fetch details for (default 10): ") or "10")
+            max_details = int(input("Maximum number of properties to fetch details for per location (default 10): ") or "10")
         except ValueError:
             max_details = 10
     else:
@@ -974,21 +1216,62 @@ if __name__ == "__main__":
     else:
         print("No working proxy found. Continuing without proxy...")
     
-    print(f"Scraping Rightmove for properties in {location}...")
-    properties = scrape_rightmove(location, num_pages, fetch_details, max_details, proxy=proxy)
+    all_properties = []
+    all_transformed_properties = []
     
-    if not properties:
-        print("No properties found. Please check the location name or try again later.")
+    for location in locations:
+        print(f"\nScraping Rightmove for properties in {location}...")
+        properties = scrape_rightmove(location, num_pages, fetch_details, max_details, proxy=proxy)
+        
+        if not properties:
+            print(f"No properties found for {location}. Please check the location name or try again later.")
+        else:
+            # Transform to uniform format
+            transformed_properties = transform_to_uk_property_format(properties)
+            
+            all_properties.extend(properties)
+            all_transformed_properties.extend(transformed_properties)
+            
+            # Save individual location data (raw format)
+            output_file = f"rightmove_{location.lower().replace(' ', '_')}_properties.csv"
+            save_to_csv(properties, output_file)
+            
+            # Save transformed data (uniform format)
+            json_file = f"rightmove_{location.lower().replace(' ', '_')}_properties.json"
+            with open(json_file, 'w', encoding='utf-8') as f:
+                json.dump(transformed_properties, f, indent=2)
+            
+            # Also save raw data as JSON for reference
+            raw_json_file = f"rightmove_{location.lower().replace(' ', '_')}_properties_raw.json"
+            with open(raw_json_file, 'w', encoding='utf-8') as f:
+                json.dump(properties, f, indent=2)
+                
+            print(f"Data saved to {output_file}, {json_file}, and {raw_json_file}")
+    
+    if all_properties:
+        # Save combined data (raw format)
+        combined_csv = "rightmove_all_locations_properties.csv"
+        save_to_csv(all_properties, combined_csv)
+        
+        # Save combined transformed data (uniform format)
+        combined_json = "rightmove_all_locations_properties.json"
+        with open(combined_json, 'w', encoding='utf-8') as f:
+            json.dump(all_transformed_properties, f, indent=2)
+            
+        # Also save combined raw data as JSON for reference
+        combined_raw_json = "rightmove_all_locations_properties_raw.json"
+        with open(combined_raw_json, 'w', encoding='utf-8') as f:
+            json.dump(all_properties, f, indent=2)
+        
+        print(f"\nTotal properties found across all locations: {len(all_properties)}")
+        print(f"Combined data saved to {combined_csv}, {combined_json}, and {combined_raw_json}")
+        
+        # Display sample from each location
+        print("\nSample properties from each location:")
+        for location in locations:
+            location_properties = [p for p in all_transformed_properties if p.get('address', '').lower().find(location.lower()) != -1]
+            if location_properties:
+                print(f"\n{location}:")
+                display_properties(location_properties, 1)
     else:
-        # Save to CSV
-        output_file = f"rightmove_{location.lower().replace(' ', '_')}_properties.csv"
-        save_to_csv(properties, output_file)
-        
-        # Display first few properties
-        display_properties(properties, 3)
-        
-        # Also save as JSON for easier viewing
-        json_file = f"rightmove_{location.lower().replace(' ', '_')}_properties.json"
-        with open(json_file, 'w', encoding='utf-8') as f:
-            json.dump(properties, f, indent=2)
-        print(f"\nData also saved to {json_file}") 
+        print("\nNo properties found in any location. Please check the location names or try again later.") 
